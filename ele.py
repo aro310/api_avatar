@@ -1,40 +1,45 @@
+# ele.py
 import os
+import requests
 import base64
-from elevenlabs.client import ElevenLabs
-from elevenlabs import save
 
-# Initialisation du client (Utilisez des variables d'environnement sur Vercel !)
-# Remplacez os.environ.get par votre clé si test local, mais cachez-la sur Vercel
-api_key = "sk_6ac41ace41d5569923b6cd1e2f48461cdc146299e585b922"
-client = ElevenLabs(api_key=api_key)
-
+# On récupère la clé API (Variable d'environnement Vercel ou fallback local)
+ELEVENLABS_API_KEY = "sk_6ac41ace41d5569923b6cd1e2f48461cdc146299e585b922"
 def generate_audio_base64(texte):
     """
-    Génère l'audio et retourne une chaîne Base64 jouable par le frontend.
+    Génère l'audio via l'API REST d'ElevenLabs (sans SDK)
+    et retourne une chaîne Base64 jouable.
     """
+    voice_id = "SOYHLrjzK2X1ezoPC6cr" # ID de la voix (Aro ?)
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+
+    headers = {
+        "Accept": "audio/mpeg",
+        "Content-Type": "application/json",
+        "xi-api-key": ELEVENLABS_API_KEY
+    }
+
+    data = {
+        "text": texte,
+        "model_id": "eleven_multilingual_v2",
+        "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.5
+        }
+    }
+
     try:
-        # 1. Génération audio (retourne un générateur)
-        audio = client.text_to_speech.convert(
-            text=texte,
-            voice_id="SOYHLrjzK2X1ezoPC6cr",
-            model_id="eleven_multilingual_v2",
-            optimize_streaming_latency=3
-        )
+        # Appel direct à l'API (beaucoup plus léger que le SDK)
+        response = requests.post(url, json=data, headers=headers)
 
-        # 2. Sauvegarde temporaire dans /tmp (seul dossier accessible en écriture sur Vercel)
-        output_path = "/tmp/aro.mp3"
-        save(audio, output_path)
+        if response.status_code != 200:
+            print(f"Erreur ElevenLabs ({response.status_code}): {response.text}")
+            return None
 
-        # 3. Conversion en Base64 pour renvoyer au frontend
-        with open(output_path, "rb") as audio_file:
-            audio_bytes = audio_file.read()
-            base64_audio = base64.b64encode(audio_bytes).decode('utf-8')
-
-        # 4. Nettoyage (facultatif mais propre)
-        os.remove(output_path)
-
-        return base64_audio
+        # Conversion directe du contenu binaire en Base64
+        audio_base64 = base64.b64encode(response.content).decode('utf-8')
+        return audio_base64
 
     except Exception as e:
-        print(f"Erreur ElevenLabs: {str(e)}")
-        raise e
+        print(f"Exception lors de la génération audio: {str(e)}")
+        return None

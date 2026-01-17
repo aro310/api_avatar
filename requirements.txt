@@ -1,5 +1,4 @@
 Flask
 flask-cors
-flasgger
-elevenlabs
 google-generativeai
+requests
