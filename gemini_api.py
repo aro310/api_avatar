@@ -1,70 +1,67 @@
 # app/gemini_api.py
-import google.generativeai as genai
+# gemini_api.py
+import requests
 import os
+import json
 
-# Récupération de la clé depuis les variables d'environnement
+# Récupération de la clé API
 GOOGLE_API_KEY = "AIzaSyC15PyLpKjHZPRPmqdxS2LYzbZKYQPQWIE"
 
-# Configuration de l'API
-if GOOGLE_API_KEY:
-    genai.configure(api_key=GOOGLE_API_KEY)
-else:
-    print("⚠️ Clé API Google manquante")
+# URL de l'API REST Gemini 1.5 Flash
+URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GOOGLE_API_KEY}"
 
-# Initialisation du modèle
-MODEL_NAME = "gemini-1.5-flash" # J'ai mis un modèle standard, remets "gemma-3-27b-it" si tu y as accès
-model = None
-
-try:
-    model = genai.GenerativeModel(MODEL_NAME)
-    print(f"✅ Modèle Gemini initialisé ({MODEL_NAME})")
-except Exception as e:
-    print(f"⚠️ Erreur d’initialisation du modèle Gemini : {e}")
-
-# 🧠 Mémoire courte (Attention: s'efface lors des redémarrages Vercel)
+# Mémoire vive (se reset au redémarrage serveur)
 conversation_history = []
 
 def chat_with_gemini(prompt: str) -> str:
-    global model
-    if not model:
-        return "Erreur : modèle non initialisé (vérifie ta clé API)."
+    global conversation_history
+    
+    # 1. Ajout du message utilisateur à l'historique
+    conversation_history.append({"role": "user", "parts": [{"text": prompt}]})
+
+    # 2. Préparation du payload pour l'API REST
+    # On limite l'historique aux 10 derniers échanges pour ne pas saturer
+    recent_history = conversation_history[-10:]
+
+    # Instructions système (Aro)
+    system_instruction = {
+        "role": "user",
+        "parts": [{"text": "Tu es Aro, un assistant expert football. Réponds court (max 3 phrases). Ne dis pas bonjour à chaque fois. Sois direct et sympa."}]
+    }
+    
+    # On insère l'instruction système au tout début (astuce pour l'API REST simple)
+    contents = [system_instruction] + recent_history
+
+    payload = {
+        "contents": contents,
+        "generationConfig": {
+            "temperature": 0.8,
+            "maxOutputTokens": 200,
+            "topP": 0.9
+        }
+    }
+
+    headers = {'Content-Type': 'application/json'}
 
     try:
-        # Ajoute le message user
-        conversation_history.append({"role": "user", "content": prompt})
+        # 3. Appel HTTP (Ultra léger comparé au SDK)
+        response = requests.post(URL, headers=headers, data=json.dumps(payload))
+        
+        if response.status_code != 200:
+            return f"Erreur API Google ({response.status_code}): {response.text}"
 
-        # Construit le contexte (limité aux 5 derniers échanges)
-        context = "\n".join(
-            [f"{msg['role'].capitalize()}: {msg['content']}" for msg in conversation_history[-5:]]
-        )
+        result = response.json()
 
-        system_instructions = (
-            "Tu es Aro, un assistant spécialisé dans le football. "
-            "Réponds de manière naturelle, fluide, sans saluer ni te présenter à chaque message. "
-            "Réponds en 1 à 4 phrases maximum. "
-        )
+        # 4. Parsing de la réponse JSON complexe de Google
+        try:
+            reply_text = result['candidates'][0]['content']['parts'][0]['text']
+        except (KeyError, IndexError):
+            return "Erreur: Gemini n'a pas renvoyé de texte valide."
 
-        full_prompt = f"{system_instructions}\n\nHistorique récent :\n{context}\n\nAro:"
+        # 5. Ajout de la réponse à l'historique (Note: API attend 'model', pas 'assistant')
+        conversation_history.append({"role": "model", "parts": [{"text": reply_text}]})
 
-        generation_config = genai.types.GenerationConfig(
-            max_output_tokens=180,
-            temperature=0.8,
-            top_p=0.9,
-            top_k=40,
-        )
-
-        response = model.generate_content(full_prompt, generation_config=generation_config)
-
-        if not response or not getattr(response, "text", None):
-            return "⚠️ Aucune réponse générée par Gemini."
-
-        reply = response.text.strip()
-
-        # Ajoute la réponse assistant
-        conversation_history.append({"role": "assistant", "content": reply})
-
-        return reply
+        return reply_text
 
     except Exception as e:
-        print("💥 Erreur Gemini :", str(e))
         return f"Erreur interne : {str(e)}"
