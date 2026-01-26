@@ -1,61 +1,97 @@
 # app/gemini_api.py
 import requests
 import json
-import datetime
+import urllib.parse
+from bs4 import BeautifulSoup
 
 # --- CONFIGURATION ---
 GOOGLE_API_KEY = "AIzaSyC15PyLpKjHZPRPmqdxS2LYzbZKYQPQWIE"
 
-# ATTENTION : Si Gemma-3 refuse encore les "tools" après cette correction, 
-# c'est que le modèle spécifique ne supporte pas encore la recherche web via API.
-# Dans ce cas, changez pour "gemini-1.5-flash" ou "gemini-2.0-flash-exp".
-MODEL_NAME = "gemma-3-27b-it" 
+# On repasse sur un appel standard (sans tools) donc Gemma-3 devrait fonctionner.
+# Si Gemma-3 est instable, utilise "gemini-1.5-flash"
+MODEL_NAME = "gemma-3-27b-it"
 
-# URL de l'API (v1beta est requis pour les outils)
 URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={GOOGLE_API_KEY}"
 
+def scrape_web_context(query: str) -> str:
+    """
+    Scrape les résultats de recherche via DuckDuckGo (Version HTML légère).
+    C'est plus rapide et moins bloqué que Google pour du scraping serveur.
+    """
+    try:
+        # On nettoie la requête pour l'URL
+        encoded_query = urllib.parse.quote_plus(query + " football news")
+        search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
+
+        # Headers pour ressembler à un vrai navigateur (Indispensable pour ne pas être bloqué)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+
+        # Timeout court (3s) pour ne pas faire laguer Vercel
+        response = requests.get(search_url, headers=headers, timeout=3)
+        
+        if response.status_code != 200:
+            return ""
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Extraction des snippets (les résumés de recherche)
+        results = []
+        # DuckDuckGo HTML utilise souvent la classe 'result__snippet'
+        snippets = soup.find_all('a', class_='result__snippet')
+        
+        for snippet in snippets[:4]: # On prend seulement les 4 premiers pour limiter la taille
+            text = snippet.get_text(strip=True)
+            if text:
+                results.append(f"- {text}")
+        
+        return "\n".join(results)
+
+    except Exception as e:
+        print(f"Erreur Scraping: {e}")
+        return "" # En cas d'erreur, on renvoie vide pour ne pas bloquer le chat
+
 def chat_with_gemini(prompt: str, history: list = None) -> str:
-    """
-    Interagit avec l'API.
-    Correction : Utilise la syntaxe simplifiée 'googleSearch' demandée par l'erreur 400.
-    """
+    # 1. Scraping des infos récentes (Grounding Manuel)
+    # On ne le fait que si le prompt semble demander des infos factuelles
+    web_context = ""
+    keywords = ["score", "match", "résultat", "transfert", "joueur", "classement", "news", "actu", "qui"]
     
-    # 1. Contexte Temporel (Simulation 2026)
+    if any(k in prompt.lower() for k in keywords):
+        print("Scraping en cours...")
+        web_data = scrape_web_context(prompt)
+        if web_data:
+            web_context = (
+                f"\n[INFO DU WEB EN TEMPS RÉEL - UPDATE 2026]:\n{web_data}\n"
+                "Utilise ces infos pour répondre si elles sont pertinentes."
+            )
+
+    # 2. Setup Persona
     current_date = "Lundi 26 Janvier 2026"
-    
-    # 2. System Prompt (Expert Foot)
     system_instruction = (
-        f"Tu es Aro, expert football d'élite. Nous sommes le {current_date}. "
-        "Ton style : Direct, factuel, tutoiement, pas de bonjour répétitif. "
-        "Analyse tactique et mercato. Max 3-4 phrases. "
-        "Si tu cherches des infos, utilise Google Search."
+        f"Tu es Aro, expert football. Nous sommes le {current_date}. "
+        "Réponds de manière directe, factuelle et sympa (tutoiement). "
+        "Pas de 'Bonjour' répétitif. Max 3 phrases."
     )
 
     # 3. Construction du Payload
     contents = []
     
-    # Injection historique (si fourni par le front)
     if history:
         contents.extend(history)
     
-    # Ajout du prompt actuel
+    # On combine : [Instruction] + [Contexte Web Scrappé] + [Question User]
+    final_prompt = f"{system_instruction}\n{web_context}\n\nQuestion: {prompt}"
+
     contents.append({
         "role": "user",
-        "parts": [{"text": f"{system_instruction}\n\nRequête : {prompt}"}]
+        "parts": [{"text": final_prompt}]
     })
 
-    # 4. CONFIGURATION DES OUTILS (CORRECTION ERREUR 400)
-    # L'erreur demandait d'utiliser l'outil simple 'googleSearch' au lieu de 'retrieval'.
-    tools_config = [
-        {
-            "googleSearch": {} 
-        }
-    ]
-
-    # 5. Payload Final
+    # 4. Payload Standard (Sans 'tools' qui causaient l'erreur 400)
     payload = {
         "contents": contents,
-        "tools": tools_config, # Activation recherche Web
         "generationConfig": {
             "temperature": 0.7,
             "maxOutputTokens": 300,
@@ -66,30 +102,17 @@ def chat_with_gemini(prompt: str, history: list = None) -> str:
     headers = {'Content-Type': 'application/json'}
 
     try:
-        # Timeout un peu plus long car la recherche Google prend 1-2 sec de plus
-        response = requests.post(URL, headers=headers, data=json.dumps(payload), timeout=30)
+        response = requests.post(URL, headers=headers, data=json.dumps(payload), timeout=20)
         
         if response.status_code != 200:
-            return f"Erreur Tactique ({response.status_code}) : {response.text}"
+            return f"Erreur API ({response.status_code}): {response.text}"
 
         result = response.json()
 
-        # 6. Extraction Robuste
         try:
-            candidate = result['candidates'][0]
-            
-            # Vérification du contenu
-            if 'content' in candidate and 'parts' in candidate['content']:
-                reply_text = candidate['content']['parts'][0]['text']
-                return reply_text
-            else:
-                # Parfois le modèle renvoie uniquement des métadonnées de recherche sans texte si la question est obscure
-                return "L'arbitre consulte la VAR (Pas de réponse textuelle, rephrase ta question)."
-
-        except (KeyError, IndexError, TypeError) as e:
-            # Log pour le débogage serveur si besoin
-            print(f"DEBUG JSON: {result}") 
-            return "Problème de finition devant le but (Erreur lecture réponse)."
+            return result['candidates'][0]['content']['parts'][0]['text']
+        except (KeyError, IndexError, TypeError):
+            return "Pas de réponse lisible du modèle."
 
     except Exception as e:
-        return f"Erreur technique : {str(e)}"
+        return f"Erreur interne : {str(e)}"
