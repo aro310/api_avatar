@@ -50,11 +50,12 @@ def chat():
     try:
         data = request.get_json()
         prompt = data.get("prompt")
+        history = data.get("history", [])  # Liste des messages précédents (client doit la gérer)
 
         if not prompt:
             return jsonify({"status": "error", "message": "Prompt manquant"}), 400
 
-        response_text = chat_with_gemini(prompt)
+        response_text = chat_with_gemini(prompt, history)
 
         return jsonify({
             "status": "success",
@@ -63,6 +64,6 @@ def chat():
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
-
+    
 if __name__ == "__main__":
     app.run(debug=True, port=5001)

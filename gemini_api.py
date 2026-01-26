@@ -1,166 +1,130 @@
-# gemini_api.py (2026)
+# app/gemini_api.py
 import requests
 import json
-import re
-from functools import lru_cache
-from datetime import datetime
-from bs4 import BeautifulSoup
+from typing import List, Dict, Optional
 
-# =============================
-# CONFIG API (clé en dur)
-# =============================
-
+# Clé API (gardée en dur comme demandé)
 GOOGLE_API_KEY = "AIzaSyC15PyLpKjHZPRPmqdxS2LYzbZKYQPQWIE"
+
+# Modèle demandé
 MODEL_NAME = "gemma-3-27b-it"
 
-API_URL = (
-    f"https://generativelanguage.googleapis.com/v1beta/models/"
-    f"{MODEL_NAME}:generateContent?key={GOOGLE_API_KEY}"
-)
+# URL de l'API
+URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={GOOGLE_API_KEY}"
 
-HEADERS = {"Content-Type": "application/json"}
-
-# Session HTTP persistante (plus rapide sur Vercel)
-session = requests.Session()
-session.headers.update(HEADERS)
-
-# =============================
-# MÉMOIRE CONVERSATION
-# =============================
-
-MAX_HISTORY = 4
-conversation_history = []
-
-# =============================
-# NLP FOOTBALL (léger)
-# =============================
-
-FOOTBALL_TERMS = (
-    "joueur", "club", "but", "buts", "match", "transfert",
-    "palmarès", "ligue", "can", "coupe", "championnat",
-    "ballon d'or", "fifa", "caf", "uefa"
-)
-
-def is_football_query(text: str) -> bool:
-    t = text.lower()
-    return any(word in t for word in FOOTBALL_TERMS)
-
-# =============================
-# SCRAPING WIKIPEDIA (2026)
-# =============================
-
-@lru_cache(maxsize=128)
-def fetch_wikipedia_context(query: str) -> str:
-    query = query.replace(" ", "_")
-    urls = [
-        f"https://fr.wikipedia.org/wiki/{query}",
-        f"https://en.wikipedia.org/wiki/{query}"
-    ]
-
-    for url in urls:
-        try:
-            r = session.get(url, timeout=4)
-            if r.status_code != 200:
-                continue
-
-            soup = BeautifulSoup(r.text, "html.parser")
-            paragraph = soup.select_one("p")
-
-            if paragraph:
-                text = re.sub(r"\[\d+\]", "", paragraph.text).strip()
-                return text[:600]
-        except Exception:
-            pass
-
-    return ""
-
-# =============================
-# CONTEXTE SYSTÈME (Gemma Hack)
-# =============================
-
-SYSTEM_CONTEXT = [
+# Instructions système simulées (hack car Gemma refuse systemInstruction)
+INSTRUCTION_SETUP = [
     {
         "role": "user",
         "parts": [{
             "text": (
-                "Instructions système : Tu es ARO, analyste football professionnel en 2026. "
-                "Réponses courtes (2–3 phrases max), factuelles et à jour. "
-                "Si utile, base-toi sur Wikipédia. "
-                "Pas de salutations inutiles."
+                "Tu es Aro, un assistant expert en football. "
+                "Tu réponds toujours en français, de façon très courte (maximum 3 phrases), "
+                "directe, factuelle, sympathique et enthousiaste. "
+                "Ne commence jamais par bonjour ou salutations répétées. "
+                "La date actuelle est le 26 janvier 2026. "
+                "Tes connaissances en football sont à jour jusqu’à cette date inclusivement "
+                "(résultats, classements, transferts, actualités récentes)."
             )
         }]
     },
     {
         "role": "model",
-        "parts": [{"text": "Compris."}]
+        "parts": [{"text": "Compris ! Je suis Aro, expert football, prêt à répondre avec les dernières infos au 26 janvier 2026."}]
     }
 ]
 
-# =============================
-# FONCTION PRINCIPALE
-# =============================
+def chat_with_gemini(
+    user_prompt: str,
+    previous_messages: Optional[List[Dict]] = None
+) -> str:
+    """
+    Fonction optimisée pour Vercel (stateless).
+    - user_prompt : le nouveau message de l'utilisateur
+    - previous_messages : liste des messages précédents (format Gemini API)
+      Le client doit conserver et renvoyer cet historique pour maintenir la conversation.
+    """
+    if previous_messages is None:
+        previous_messages = []
 
-def chat_with_gemini(prompt: str) -> str:
-    global conversation_history
+    if not user_prompt or not user_prompt.strip():
+        return "Erreur : prompt vide."
 
-    prompt = str(prompt).strip()
-    if not prompt:
-        return "Question vide."
-
-    # Enrichissement Wikipédia si football
-    wiki_context = ""
-    if is_football_query(prompt):
-        wiki_context = fetch_wikipedia_context(prompt)
-
-    # Mémoire utilisateur
-    conversation_history.append({
+    # Construction de l'historique complet
+    current_user_message = {
         "role": "user",
-        "parts": [{"text": prompt}]
-    })
-    conversation_history = conversation_history[-MAX_HISTORY:]
+        "parts": [{"text": user_prompt.strip()}]
+    }
+    all_messages = previous_messages + [current_user_message]
 
-    enriched_prompt = prompt
-    if wiki_context:
-        enriched_prompt += (
-            "\n\nContexte Wikipédia :\n"
-            f"{wiki_context}\n"
-            f"(vérifié {datetime.utcnow().year})"
-        )
+    # Limitation du contexte pour éviter les dépassements de tokens (sécurité + coût)
+    # On garde les instructions + les 12 derniers échanges max
+    recent_messages = all_messages[-12:]
 
-    contents = (
-        SYSTEM_CONTEXT +
-        conversation_history[:-1] +
-        [{"role": "user", "parts": [{"text": enriched_prompt}]}]
-    )
+    # Contexte final = instructions forcées + messages récents
+    full_contents = INSTRUCTION_SETUP + recent_messages
 
+    # Payload
     payload = {
-        "contents": contents,
+        "contents": full_contents,
         "generationConfig": {
-            "temperature": 0.5,
-            "topP": 0.9,
-            "maxOutputTokens": 160
-        }
+            "temperature": 0.8,
+            "maxOutputTokens": 200,
+            "topP": 0.9
+        },
+        # Safety settings légers (football = contenu sûr)
+        "safetySettings": [
+            {
+                "category": "HARM_CATEGORY_HARASSMENT",
+                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+            },
+            {
+                "category": "HARM_CATEGORY_HATE_SPEECH",
+                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+            },
+            {
+                "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+            },
+            {
+                "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+            }
+        ]
     }
 
+    headers = {'Content-Type': 'application/json'}
+
     try:
-        response = session.post(
-            API_URL,
+        response = requests.post(
+            URL,
+            headers=headers,
             data=json.dumps(payload),
-            timeout=8
+            timeout=20  # Timeout raisonnable pour Vercel
         )
 
         if response.status_code != 200:
-            return "Erreur modèle."
+            return f"Erreur API ({response.status_code}) : {response.text[:200]}"
 
-        data = response.json()
-        reply = data["candidates"][0]["content"]["parts"][0]["text"]
+        result = response.json()
 
-        conversation_history.append({
-            "role": "model",
-            "parts": [{"text": reply}]
-        })
+        # Extraction sécurisée de la réponse
+        try:
+            reply_text = result["candidates"][0]["content"]["parts"][0]["text"]
+        except (KeyError, IndexError, TypeError):
+            # Gestion des cas où le modèle bloque ou ne renvoie rien
+            if "candidates" in result and result["candidates"]:
+                if "finishReason" in result["candidates"][0]:
+                    reason = result["candidates"][0]["finishReason"]
+                    if reason == "SAFETY":
+                        return "Désolé, la réponse a été bloquée par les filtres de sécurité."
+            return "Le modèle n’a rien renvoyé de lisible."
 
-        return reply.strip()
+        return reply_text.strip()
 
-    except Exception:
-        return "Erreur interne."
+    except requests.Timeout:
+        return "Erreur : timeout de la requête Gemini."
+    except requests.ConnectionError:
+        return "Erreur : problème de connexion à l’API Gemini."
+    except Exception as e:
+        return f"Erreur interne : {str(e)}"
