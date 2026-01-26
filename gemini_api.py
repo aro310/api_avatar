@@ -4,103 +4,92 @@ import json
 import datetime
 
 # --- CONFIGURATION ---
-# ATTENTION : Laisser la clé dans le code est une mauvaise pratique de sécurité.
-# Assurez-vous que votre repo git est PRIVE.
 GOOGLE_API_KEY = "AIzaSyC15PyLpKjHZPRPmqdxS2LYzbZKYQPQWIE"
 
-# Modèle cible (Note: Gemma-3 doit être disponible sur l'API à cette date, sinon fallback auto géré)
+# ATTENTION : Si Gemma-3 refuse encore les "tools" après cette correction, 
+# c'est que le modèle spécifique ne supporte pas encore la recherche web via API.
+# Dans ce cas, changez pour "gemini-1.5-flash" ou "gemini-2.0-flash-exp".
 MODEL_NAME = "gemma-3-27b-it" 
 
-# URL de l'API
+# URL de l'API (v1beta est requis pour les outils)
 URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={GOOGLE_API_KEY}"
 
 def chat_with_gemini(prompt: str, history: list = None) -> str:
     """
-    Interagit avec l'API Gemini/Gemma.
-    Gère l'historique passé en argument (Stateless pour Vercel).
-    Active le 'Grounding' (Recherche Google) pour les news foot.
+    Interagit avec l'API.
+    Correction : Utilise la syntaxe simplifiée 'googleSearch' demandée par l'erreur 400.
     """
     
-    # 1. Définition de la Date Actuelle (Simulation 2026 comme demandé)
-    # On force la date contextuelle pour le modèle
+    # 1. Contexte Temporel (Simulation 2026)
     current_date = "Lundi 26 Janvier 2026"
     
-    # 2. Construction du System Prompt (Persona)
-    # On injecte la date et l'expertise ici.
+    # 2. System Prompt (Expert Foot)
     system_instruction = (
-        f"Tu es Aro, un expert football d'élite. "
-        f"Nous sommes le {current_date}. "
-        "Ta mission : analyse tactique pointue, actus transferts et résultats. "
-        "Style : Direct, factuel, tutoiement sympa, pas de 'Bonjour' répétitif. "
-        "Max 3-4 phrases percutantes. "
-        "Si on te demande des scores récents, utilise tes outils de recherche."
+        f"Tu es Aro, expert football d'élite. Nous sommes le {current_date}. "
+        "Ton style : Direct, factuel, tutoiement, pas de bonjour répétitif. "
+        "Analyse tactique et mercato. Max 3-4 phrases. "
+        "Si tu cherches des infos, utilise Google Search."
     )
 
-    # 3. Préparation du contenu (Message utilisateur)
-    # Pour Vercel, on ne garde pas d'historique global en mémoire RAM.
-    # On reconstruit le payload à chaque appel.
-    
+    # 3. Construction du Payload
     contents = []
     
-    # Injection de l'historique si fourni par le frontend (format [{role: user, parts:[]}, ...])
+    # Injection historique (si fourni par le front)
     if history:
-        # On nettoie l'historique pour s'assurer qu'il est au bon format
         contents.extend(history)
     
     # Ajout du prompt actuel
     contents.append({
         "role": "user",
-        "parts": [{"text": f"{system_instruction}\n\nQuestion utilisateur : {prompt}"}]
+        "parts": [{"text": f"{system_instruction}\n\nRequête : {prompt}"}]
     })
 
-    # 4. Configuration des Outils (Google Search Grounding)
-    # C'est ici que se fait le 'Scraping' natif optimisé par Google
+    # 4. CONFIGURATION DES OUTILS (CORRECTION ERREUR 400)
+    # L'erreur demandait d'utiliser l'outil simple 'googleSearch' au lieu de 'retrieval'.
     tools_config = [
         {
-            "googleSearchRetrieval": {
-                "dynamicRetrievalConfig": {
-                    "mode": "MODE_DYNAMIC", # Recherche auto si la question demande des faits récents
-                    "dynamicThreshold": 0.7
-                }
-            }
+            "googleSearch": {} 
         }
     ]
 
     # 5. Payload Final
     payload = {
         "contents": contents,
-        "tools": tools_config, # Active l'accès au web
+        "tools": tools_config, # Activation recherche Web
         "generationConfig": {
-            "temperature": 0.7, # Un peu plus bas pour la précision factuelle foot
+            "temperature": 0.7,
             "maxOutputTokens": 300,
-            "topP": 0.9,
-            "topK": 40
+            "topP": 0.9
         }
     }
 
     headers = {'Content-Type': 'application/json'}
 
     try:
-        response = requests.post(URL, headers=headers, data=json.dumps(payload), timeout=25)
+        # Timeout un peu plus long car la recherche Google prend 1-2 sec de plus
+        response = requests.post(URL, headers=headers, data=json.dumps(payload), timeout=30)
         
         if response.status_code != 200:
-            # Gestion d'erreur spécifique (ex: modèle inexistant, on tente un fallback)
-            return f"Erreur Tactique ({response.status_code}) : Le vestiaire est fermé. ({response.text})"
+            return f"Erreur Tactique ({response.status_code}) : {response.text}"
 
         result = response.json()
 
-        # Extraction intelligente
+        # 6. Extraction Robuste
         try:
             candidate = result['candidates'][0]
-            reply_text = candidate['content']['parts'][0]['text']
             
-            # Vérification si des données de recherche ont été utilisées (Grounding)
-            # On pourrait ajouter les sources si besoin, mais Aro doit rester concis.
-            
-            return reply_text
-            
-        except (KeyError, IndexError, TypeError):
-            return "Aro est hors-jeu (Réponse vide du modèle)."
+            # Vérification du contenu
+            if 'content' in candidate and 'parts' in candidate['content']:
+                reply_text = candidate['content']['parts'][0]['text']
+                return reply_text
+            else:
+                # Parfois le modèle renvoie uniquement des métadonnées de recherche sans texte si la question est obscure
+                return "L'arbitre consulte la VAR (Pas de réponse textuelle, rephrase ta question)."
+
+        except (KeyError, IndexError, TypeError) as e:
+            # Log pour le débogage serveur si besoin
+            print(f"DEBUG JSON: {result}") 
+            return "Problème de finition devant le but (Erreur lecture réponse)."
 
     except Exception as e:
-        return f"Erreur technique (Carton rouge) : {str(e)}"
+        return f"Erreur technique : {str(e)}"
