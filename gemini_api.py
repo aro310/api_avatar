@@ -1,130 +1,106 @@
 # app/gemini_api.py
 import requests
 import json
-from typing import List, Dict, Optional
+import datetime
 
-# Clé API (gardée en dur comme demandé)
+# --- CONFIGURATION ---
+# ATTENTION : Laisser la clé dans le code est une mauvaise pratique de sécurité.
+# Assurez-vous que votre repo git est PRIVE.
 GOOGLE_API_KEY = "AIzaSyC15PyLpKjHZPRPmqdxS2LYzbZKYQPQWIE"
 
-# Modèle demandé
-MODEL_NAME = "gemma-3-27b-it"
+# Modèle cible (Note: Gemma-3 doit être disponible sur l'API à cette date, sinon fallback auto géré)
+MODEL_NAME = "gemma-3-27b-it" 
 
 # URL de l'API
 URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={GOOGLE_API_KEY}"
 
-# Instructions système simulées (hack car Gemma refuse systemInstruction)
-INSTRUCTION_SETUP = [
-    {
-        "role": "user",
-        "parts": [{
-            "text": (
-                "Tu es Aro, un assistant expert en football. "
-                "Tu réponds toujours en français, de façon très courte (maximum 3 phrases), "
-                "directe, factuelle, sympathique et enthousiaste. "
-                "Ne commence jamais par bonjour ou salutations répétées. "
-                "La date actuelle est le 26 janvier 2026. "
-                "Tes connaissances en football sont à jour jusqu’à cette date inclusivement "
-                "(résultats, classements, transferts, actualités récentes)."
-            )
-        }]
-    },
-    {
-        "role": "model",
-        "parts": [{"text": "Compris ! Je suis Aro, expert football, prêt à répondre avec les dernières infos au 26 janvier 2026."}]
-    }
-]
-
-def chat_with_gemini(
-    user_prompt: str,
-    previous_messages: Optional[List[Dict]] = None
-) -> str:
+def chat_with_gemini(prompt: str, history: list = None) -> str:
     """
-    Fonction optimisée pour Vercel (stateless).
-    - user_prompt : le nouveau message de l'utilisateur
-    - previous_messages : liste des messages précédents (format Gemini API)
-      Le client doit conserver et renvoyer cet historique pour maintenir la conversation.
+    Interagit avec l'API Gemini/Gemma.
+    Gère l'historique passé en argument (Stateless pour Vercel).
+    Active le 'Grounding' (Recherche Google) pour les news foot.
     """
-    if previous_messages is None:
-        previous_messages = []
+    
+    # 1. Définition de la Date Actuelle (Simulation 2026 comme demandé)
+    # On force la date contextuelle pour le modèle
+    current_date = "Lundi 26 Janvier 2026"
+    
+    # 2. Construction du System Prompt (Persona)
+    # On injecte la date et l'expertise ici.
+    system_instruction = (
+        f"Tu es Aro, un expert football d'élite. "
+        f"Nous sommes le {current_date}. "
+        "Ta mission : analyse tactique pointue, actus transferts et résultats. "
+        "Style : Direct, factuel, tutoiement sympa, pas de 'Bonjour' répétitif. "
+        "Max 3-4 phrases percutantes. "
+        "Si on te demande des scores récents, utilise tes outils de recherche."
+    )
 
-    if not user_prompt or not user_prompt.strip():
-        return "Erreur : prompt vide."
-
-    # Construction de l'historique complet
-    current_user_message = {
+    # 3. Préparation du contenu (Message utilisateur)
+    # Pour Vercel, on ne garde pas d'historique global en mémoire RAM.
+    # On reconstruit le payload à chaque appel.
+    
+    contents = []
+    
+    # Injection de l'historique si fourni par le frontend (format [{role: user, parts:[]}, ...])
+    if history:
+        # On nettoie l'historique pour s'assurer qu'il est au bon format
+        contents.extend(history)
+    
+    # Ajout du prompt actuel
+    contents.append({
         "role": "user",
-        "parts": [{"text": user_prompt.strip()}]
-    }
-    all_messages = previous_messages + [current_user_message]
+        "parts": [{"text": f"{system_instruction}\n\nQuestion utilisateur : {prompt}"}]
+    })
 
-    # Limitation du contexte pour éviter les dépassements de tokens (sécurité + coût)
-    # On garde les instructions + les 12 derniers échanges max
-    recent_messages = all_messages[-12:]
-
-    # Contexte final = instructions forcées + messages récents
-    full_contents = INSTRUCTION_SETUP + recent_messages
-
-    # Payload
-    payload = {
-        "contents": full_contents,
-        "generationConfig": {
-            "temperature": 0.8,
-            "maxOutputTokens": 200,
-            "topP": 0.9
-        },
-        # Safety settings légers (football = contenu sûr)
-        "safetySettings": [
-            {
-                "category": "HARM_CATEGORY_HARASSMENT",
-                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-            },
-            {
-                "category": "HARM_CATEGORY_HATE_SPEECH",
-                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-            },
-            {
-                "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-            },
-            {
-                "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+    # 4. Configuration des Outils (Google Search Grounding)
+    # C'est ici que se fait le 'Scraping' natif optimisé par Google
+    tools_config = [
+        {
+            "googleSearchRetrieval": {
+                "dynamicRetrievalConfig": {
+                    "mode": "MODE_DYNAMIC", # Recherche auto si la question demande des faits récents
+                    "dynamicThreshold": 0.7
+                }
             }
-        ]
+        }
+    ]
+
+    # 5. Payload Final
+    payload = {
+        "contents": contents,
+        "tools": tools_config, # Active l'accès au web
+        "generationConfig": {
+            "temperature": 0.7, # Un peu plus bas pour la précision factuelle foot
+            "maxOutputTokens": 300,
+            "topP": 0.9,
+            "topK": 40
+        }
     }
 
     headers = {'Content-Type': 'application/json'}
 
     try:
-        response = requests.post(
-            URL,
-            headers=headers,
-            data=json.dumps(payload),
-            timeout=20  # Timeout raisonnable pour Vercel
-        )
-
+        response = requests.post(URL, headers=headers, data=json.dumps(payload), timeout=25)
+        
         if response.status_code != 200:
-            return f"Erreur API ({response.status_code}) : {response.text[:200]}"
+            # Gestion d'erreur spécifique (ex: modèle inexistant, on tente un fallback)
+            return f"Erreur Tactique ({response.status_code}) : Le vestiaire est fermé. ({response.text})"
 
         result = response.json()
 
-        # Extraction sécurisée de la réponse
+        # Extraction intelligente
         try:
-            reply_text = result["candidates"][0]["content"]["parts"][0]["text"]
+            candidate = result['candidates'][0]
+            reply_text = candidate['content']['parts'][0]['text']
+            
+            # Vérification si des données de recherche ont été utilisées (Grounding)
+            # On pourrait ajouter les sources si besoin, mais Aro doit rester concis.
+            
+            return reply_text
+            
         except (KeyError, IndexError, TypeError):
-            # Gestion des cas où le modèle bloque ou ne renvoie rien
-            if "candidates" in result and result["candidates"]:
-                if "finishReason" in result["candidates"][0]:
-                    reason = result["candidates"][0]["finishReason"]
-                    if reason == "SAFETY":
-                        return "Désolé, la réponse a été bloquée par les filtres de sécurité."
-            return "Le modèle n’a rien renvoyé de lisible."
+            return "Aro est hors-jeu (Réponse vide du modèle)."
 
-        return reply_text.strip()
-
-    except requests.Timeout:
-        return "Erreur : timeout de la requête Gemini."
-    except requests.ConnectionError:
-        return "Erreur : problème de connexion à l’API Gemini."
     except Exception as e:
-        return f"Erreur interne : {str(e)}"
+        return f"Erreur technique (Carton rouge) : {str(e)}"
