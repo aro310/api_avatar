@@ -9,7 +9,7 @@ GOOGLE_API_KEY = "AIzaSyC15PyLpKjHZPRPmqdxS2LYzbZKYQPQWIE"
 
 # On repasse sur un appel standard (sans tools) donc Gemma-3 devrait fonctionner.
 # Si Gemma-3 est instable, utilise "gemini-1.5-flash"
-MODEL_NAME = "gemma-3-27b-it"
+MODEL_NAME = "gemma-3-4b-it"
 
 URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={GOOGLE_API_KEY}"
 
