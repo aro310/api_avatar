@@ -15,25 +15,35 @@ URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:gen
 
 def scrape_web_context(query: str) -> str:
     """
-    Scrape les résultats DuckDuckGo (Version HTML).
+    Scrape les résultats de recherche via DuckDuckGo (Version HTML légère).
+    C'est plus rapide et moins bloqué que Google pour du scraping serveur.
     """
     try:
+        # On nettoie la requête pour l'URL
         encoded_query = urllib.parse.quote_plus(query + " football news")
         search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
-        
+
+        # Headers pour ressembler à un vrai navigateur (Indispensable pour ne pas être bloqué)
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
 
+        
+
+        # Timeout court (3s) pour ne pas faire laguer Vercel
         response = requests.get(search_url, headers=headers, timeout=3)
+        
         if response.status_code != 200:
             return ""
 
         soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Extraction des snippets (les résumés de recherche)
         results = []
+        # DuckDuckGo HTML utilise souvent la classe 'result__snippet'
         snippets = soup.find_all('a', class_='result__snippet')
         
-        for snippet in snippets[:3]: # 3 résultats suffisent pour le contexte
+        for snippet in snippets[:4]: # On prend seulement les 4 premiers pour limiter la taille
             text = snippet.get_text(strip=True)
             if text:
                 results.append(f"- {text}")
@@ -42,58 +52,52 @@ def scrape_web_context(query: str) -> str:
 
     except Exception as e:
         print(f"Erreur Scraping: {e}")
-        return ""
+        return "" # En cas d'erreur, on renvoie vide pour ne pas bloquer le chat
 
-def chat_with_gemini(prompt: str, history: list = None) -> dict:
-    """
-    Retourne un dictionnaire contenant la réponse et l'historique mis à jour.
-    """
-    if history is None:
-        history = []
-
-    # 1. Scraping (Grounding)
+def chat_with_gemini(prompt: str, history: list = None) -> str:
+    # 1. Scraping des infos récentes (Grounding Manuel)
+    # On ne le fait que si le prompt semble demander des infos factuelles
     web_context = ""
     keywords = ["score", "match", "résultat", "transfert", "joueur", "classement", "news", "actu", "qui"]
     
     if any(k in prompt.lower() for k in keywords):
-        print("🔍 Recherche d'infos récentes...")
+        print("Scraping en cours...")
         web_data = scrape_web_context(prompt)
         if web_data:
-            # On injecte le contexte web juste pour CE tour, sans polluer tout l'historique
             web_context = (
-                f"INFORMATIONS TEMPS RÉEL (Web):\n{web_data}\n"
-                "Utilise ces infos si pertinentes. "
+                f"\n[INFO DU WEB EN TEMPS RÉEL - UPDATE 2026]:\n{web_data}\n"
+                "Utilise ces infos pour répondre si elles sont pertinentes."
             )
 
-    # 2. Instruction Système (La personnalité est définie ICI, pas dans le message user)
-    current_date = "Lundi 26 Janvier 2026" # Mettez une date dynamique en prod
-    system_instruction_text = (
-        f"Tu es Aro, un expert football passionné. Nous sommes le {current_date}. "
-        "IMPORTANT : Ne dis JAMAIS 'Bonjour' ou 'Salut' au début de tes phrases, continue directement la conversation. "
-        "Tu tutoies l'utilisateur. Tes réponses sont courtes, factuelles et dynamiques."
+    # 2. Setup Persona
+    current_date = "Lundi 26 Janvier 2026"
+    system_instruction = (
+        f"Tu es Aro, expert football. Nous sommes le {current_date}. "
+        "Réponds de manière directe, factuelle et sympa (tutoiement). "
+        "Pas de 'Bonjour' répétitif. Max 3 phrases."
     )
 
-    # 3. Préparation du message actuel
-    # On combine le contexte web éventuel avec la question de l'utilisateur
-    full_user_message = f"{web_context}\nQuestion utilisateur: {prompt}"
+    # 3. Construction du Payload
+    contents = []
+    
+    if history:
+        contents.extend(history)
+    
+    # On combine : [Instruction] + [Contexte Web Scrappé] + [Question User]
+    final_prompt = f"{system_instruction}\n{web_context}\n\nQuestion: {prompt}"
 
-    # On crée une copie de l'historique pour l'envoi (pour ne pas modifier l'original tout de suite)
-    payload_contents = list(history)
-    payload_contents.append({
+    contents.append({
         "role": "user",
-        "parts": [{"text": full_user_message}]
+        "parts": [{"text": final_prompt}]
     })
 
-    # 4. Construction du Payload JSON complet
+    # 4. Payload Standard (Sans 'tools' qui causaient l'erreur 400)
     payload = {
-        # 'system_instruction' est la clé magique pour définir le comportement global
-        "system_instruction": {
-            "parts": [{"text": system_instruction_text}]
-        },
-        "contents": payload_contents,
+        "contents": contents,
         "generationConfig": {
             "temperature": 0.7,
             "maxOutputTokens": 300,
+            "topP": 0.9
         }
     }
 
@@ -103,44 +107,14 @@ def chat_with_gemini(prompt: str, history: list = None) -> dict:
         response = requests.post(URL, headers=headers, data=json.dumps(payload), timeout=20)
         
         if response.status_code != 200:
-            return {"text": f"Erreur API ({response.status_code}): {response.text}", "history": history}
+            return f"Erreur API ({response.status_code}): {response.text}"
 
         result = response.json()
-        
-        try:
-            ai_response = result['candidates'][0]['content']['parts'][0]['text']
-            
-            # MISE À JOUR DE L'HISTORIQUE (IMPORTANT POUR LA SUITE)
-            # On ajoute la question originale (sans le blabla technique du web context pour garder l'historique propre)
-            history.append({"role": "user", "parts": [{"text": prompt}]})
-            # On ajoute la réponse de l'IA
-            history.append({"role": "model", "parts": [{"text": ai_response}]})
 
-            return {
-                "text": ai_response,
-                "history": history
-            }
-            
-        except (KeyError, IndexError, TypeError) as e:
-            return {"text": "Désolé, je n'ai pas compris la réponse du serveur.", "history": history}
+        try:
+            return result['candidates'][0]['content']['parts'][0]['text']
+        except (KeyError, IndexError, TypeError):
+            return "Pas de réponse lisible du modèle."
 
     except Exception as e:
-        return {"text": f"Erreur interne : {str(e)}", "history": history}
-
-# --- EXEMPLE D'UTILISATION (Simulation de boucle) ---
-if __name__ == "__main__":
-    conversation_history = []
-
-    print("--- Aro Football Bot (Tape 'quit' pour sortir) ---")
-    while True:
-        user_input = input("\nToi: ")
-        if user_input.lower() in ['quit', 'exit']:
-            break
-        
-        # On passe l'historique à la fonction et on récupère le résultat MIS A JOUR
-        result = chat_with_gemini(user_input, conversation_history)
-        
-        print(f"Aro: {result['text']}")
-        
-        # On sauvegarde l'historique pour le prochain tour
-        conversation_history = result['history']
+        return f"Erreur interne : {str(e)}"
