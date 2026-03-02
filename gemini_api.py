@@ -3,9 +3,12 @@ import requests
 import json
 import urllib.parse
 from bs4 import BeautifulSoup
+import os
 
 # --- CONFIGURATION ---
-GOOGLE_API_KEY = "AIzaSyC15PyLpKjHZPRPmqdxS2LYzbZKYQPQWIE"
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+if not GOOGLE_API_KEY:
+    raise ValueError("La variable d'environnement GOOGLE_API_KEY n'est pas définie !")
 
 # On repasse sur un appel standard (sans tools) donc Gemma-3 devrait fonctionner.
 # Si Gemma-3 est instable, utilise "gemini-1.5-flash"
