@@ -40,11 +40,21 @@ def chat():
             return jsonify({"status": "error", "message": "Il manque le ballon (Prompt vide)"}), 400
 
         # Appel à la logique NLP
-        response_text = chat_with_gemini(prompt, history)
+        chat_result = chat_with_gemini(prompt, history)
+        
+        response_text = ""
+        action = None
+        
+        if isinstance(chat_result, dict):
+            response_text = chat_result.get("response", "")
+            action = chat_result.get("action")
+        else:
+            response_text = chat_result
 
         return jsonify({
             "status": "success",
             "response": response_text,
+            "action": action
             # On pourrait renvoyer l'historique mis à jour ici si on voulait faire du stateful
         })
 
